@@ -1,0 +1,327 @@
+//@version=6
+indicator("IDX Accumulation Phase Screener - Weekly", overlay=true)
+
+// ========================================
+// LIQUIDITY FILTERS
+// ========================================
+// Purpose: Filter out illiquid penny stocks that are hard to trade
+// Inference: Only stocks with sufficient price and volume are tradable for most investors
+minPrice = input.float(500, "Minimum Price (IDR)", group="Liquidity Filters")
+minAvgVolume = input.int(500000, "Minimum Avg Volume (shares)", group="Liquidity Filters")
+volumePeriod = input.int(20, "Volume Average Period", group="Liquidity Filters")
+
+// ========================================
+// WYCKOFF & ACCUMULATION PARAMETERS
+// ========================================
+rangePeriod = input.int(13, "Range Detection Period (weeks)", group="Wyckoff Settings")
+rangeThreshold = input.float(15, "Max Range Size (%)", group="Wyckoff Settings", tooltip="Maximum price range for consolidation")
+volumeMultiplier = input.float(1.2, "Volume Spike Multiplier", group="Wyckoff Settings")
+
+// ========================================
+// TECHNICAL INDICATORS SETTINGS
+// ========================================
+rsiPeriod = input.int(14, "RSI Period", group="Indicators")
+rsiLow = input.int(30, "RSI Lower Bound", group="Indicators")
+rsiHigh = input.int(60, "RSI Upper Bound", group="Indicators")
+maShort = input.int(20, "Short MA Period", group="Indicators")
+maLong = input.int(50, "Long MA Period", group="Indicators")
+
+// ========================================
+// CALCULATIONS WITH DETAILED EXPLANATIONS
+// ========================================
+
+// === LIQUIDITY CHECK ===
+// What: Checks if stock meets minimum trading requirements
+// Values: true/false
+// Inference: true = Stock is liquid enough to trade; false = Avoid (hard to enter/exit)
+avgVolume = ta.sma(volume, volumePeriod)
+isLiquid = close >= minPrice and avgVolume >= minAvgVolume
+
+// === PRICE RANGE ANALYSIS (Wyckoff Consolidation) ===
+// What: Measures price volatility over recent period
+// Values: Percentage (e.g., 5%, 10%, 20%)
+// Inference: 
+//   - Low % (< 15%) = Tight consolidation, potential accumulation
+//   - High % (> 15%) = Still trending or too volatile
+//   - Wyckoff theory: Accumulation happens in narrow ranges
+highestHigh = ta.highest(high, rangePeriod)
+lowestLow = ta.lowest(low, rangePeriod)
+priceRange = ((highestHigh - lowestLow) / lowestLow) * 100
+isConsolidating = priceRange <= rangeThreshold
+
+// === RANGE POSITION ===
+// What: Where current price sits within the consolidation range
+// Values: 0-100%
+// Inference:
+//   - 0-30% = Near support (bottom of range) - good entry zone
+//   - 30-70% = Middle of range - neutral
+//   - 70-100% = Near resistance (top of range) - wait for breakout
+rangePosition = ((close - lowestLow) / (highestHigh - lowestLow)) * 100
+
+// === VOLUME ANALYSIS (Buyer vs Seller Pressure) ===
+// What: Compares volume on up days vs down days
+// Values: Ratio (e.g., 0.8, 1.2, 1.5)
+// Inference:
+//   - Ratio > 1.2 = More buying than selling (accumulation)
+//   - Ratio < 0.8 = More selling than buying (distribution)
+//   - Ratio ≈ 1.0 = Balanced, no clear direction
+upVolume = close > open ? volume : 0
+downVolume = close <= open ? volume : 0
+upVolSum = math.sum(upVolume, 10)
+downVolSum = math.sum(downVolume, 10)
+volumeRatio = downVolSum > 0 ? upVolSum / downVolSum : 0
+isBuyerVolume = volumeRatio > 1.2
+
+// === ON-BALANCE VOLUME (OBV) ===
+// What: Cumulative volume indicator showing money flow
+// Values: Cumulative number (absolute value less important than trend)
+// Inference:
+//   - OBV rising + price flat = Smart money accumulating (bullish)
+//   - OBV falling + price flat = Distribution (bearish)
+//   - OBV confirms price moves = Healthy trend
+obv = ta.cum(math.sign(ta.change(close)) * volume)
+obvMA = ta.sma(obv, 10)
+obvMARising = ta.rising(obvMA, 3)
+isOBVRising = obv > obvMA and obvMARising
+
+// === VOLUME CLIMAX (Wyckoff) ===
+// What: Detects unusual volume spikes
+// Values: true when volume > 1.2x average
+// Inference:
+//   - Volume spike + price up = Institutional buying (bullish if in accumulation)
+//   - Volume spike + price down = Panic selling or shakeout (potential spring)
+//   - Wyckoff: Climax marks end of trend phase
+isVolumeClimax = volume > avgVolume * volumeMultiplier
+
+// === SPRING DETECTION (Wyckoff Pattern) ===
+// What: Identifies false breakdown followed by quick recovery
+// Values: true/false
+// Inference:
+//   - Spring = Weak hands shaken out, smart money buying the dip
+//   - Classic Wyckoff sign of accumulation ending
+//   - Often precedes markup phase (rally)
+wasSpring = low[1] < lowestLow[2] and close[1] > low[1] and close > close[1]
+
+// === RSI (Relative Strength Index) ===
+// What: Momentum oscillator measuring speed/magnitude of price changes
+// Values: 0-100
+// Inference:
+//   - RSI 30-60 + rising = Recovery from oversold, building strength
+//   - RSI < 30 = Oversold (potential bottom)
+//   - RSI > 70 = Overbought (potential top)
+//   - In accumulation: RSI should be recovering but not overbought
+rsi = ta.rsi(close, rsiPeriod)
+rsiRising = ta.rising(rsi, 2)
+isRSIRecovery = rsi >= rsiLow and rsi <= rsiHigh and rsiRising
+
+// === MOVING AVERAGE SLOPE ===
+// What: Rate of change of the 20-week moving average
+// Values: Percentage (e.g., -5%, 0%, +3%)
+// Inference:
+//   - Slope near 0% (± 2%) = MA flattening, trend exhaustion
+//   - Positive slope = Uptrend
+//   - Negative slope = Downtrend
+//   - In accumulation: MA should be flattening after decline
+sma20 = ta.sma(close, maShort)
+sma50 = ta.sma(close, maLong)
+maSlope20 = (sma20 - sma20[3]) / sma20[3] * 100
+isMaFlattening = math.abs(maSlope20) < 2 // Less than 2% slope
+
+// === ADX (Average Directional Index) ===
+// What: Measures trend strength (not direction)
+// Values: 0-100
+// Inference:
+//   - ADX < 25 = Weak/no trend, ranging market (ideal for accumulation)
+//   - ADX 25-50 = Strong trend forming
+//   - ADX > 50 = Very strong trend
+//   - ADX falling = Trend weakening
+//   - In accumulation: Want low or falling ADX (consolidation, not trending)
+[diPlus, diMinus, adx] = ta.dmi(14, 14)
+adxFalling = ta.falling(adx, 3)
+isWeakTrend = adx < 25 or adxFalling
+
+// === SUPPORT LEVEL CHECK ===
+// What: Is price holding above recent lows?
+// Values: true/false
+// Inference:
+//   - Price > support + 2% = Support holding, buyers defending level
+//   - Price near/below support = Support testing or breaking
+//   - Wyckoff: Price should hold support during accumulation
+supportLevel = lowestLow
+isAboveSupport = close > supportLevel * 1.02 // At least 2% above recent low
+
+// === TREND CONTEXT ===
+// What: Was stock in a downtrend before current consolidation?
+// Values: Percentage change over 20 weeks
+// Inference:
+//   - Previous decline > 5% = Coming from downtrend (classic setup)
+//   - Wyckoff: Accumulation typically follows a markdown phase
+//   - Ensures we're not catching a falling knife
+priceChange20 = ((close - close[20]) / close[20]) * 100
+wasInDecline = priceChange20[5] < -5 // Was down >5% previously
+
+// ========================================
+// ACCUMULATION SCORE (0-12 POINTS)
+// ========================================
+// What: Composite score of all accumulation factors
+// Values: 0 (no accumulation signs) to 12 (perfect accumulation setup)
+// Inference:
+//   - Score 7-8 = Moderate accumulation, watch closely
+//   - Score 9-10 = Strong accumulation, good entry opportunity
+//   - Score 11-12 = Excellent setup, multiple confirmations
+//   - Higher score = More confidence in accumulation phase
+score = 0
+if isLiquid
+    score += 1  // +1: Stock is tradable
+if isConsolidating
+    score += 2  // +2: Price in tight range (most important Wyckoff signal)
+if isBuyerVolume
+    score += 1  // +1: More buying than selling
+if isOBVRising
+    score += 1  // +1: Money flow positive
+if isRSIRecovery
+    score += 1  // +1: Momentum recovering
+if isMaFlattening
+    score += 1  // +1: Trend stabilizing
+if isWeakTrend
+    score += 1  // +1: Low volatility/ranging
+if isAboveSupport
+    score += 1  // +1: Support holding
+if wasInDecline
+    score += 1  // +1: Proper setup (decline → accumulation)
+
+// Bonus points for special Wyckoff signals
+if wasSpring
+    score += 1  // +1 BONUS: Classic Wyckoff spring pattern
+if isVolumeClimax and close > open
+    score += 1  // +1 BONUS: Volume climax with bullish close
+
+// ========================================
+// FINAL SIGNAL
+// ========================================
+// What: Is this stock in accumulation phase?
+// Inference: Score ≥ 7 + liquid = Yes, consider for watchlist/entry
+minScore = input.int(7, "Minimum Score for Signal", minval=5, maxval=12)
+isAccumulation = score >= minScore and isLiquid
+
+// ========================================
+// VISUAL SIGNALS
+// ========================================
+bgcolor(isAccumulation ? color.new(color.green, 90) : na, title="Accumulation Zone")
+
+plotshape(isAccumulation and not isAccumulation[1], 
+          "Accumulation Signal", 
+          shape.triangleup, 
+          location.belowbar, 
+          color.new(color.green, 0), 
+          size=size.normal)
+
+plotshape(wasSpring and isLiquid, 
+          "Spring", 
+          shape.diamond, 
+          location.belowbar, 
+          color.new(color.yellow, 0), 
+          size=size.small)
+
+// Plot support level
+plot(isConsolidating ? supportLevel : na, 
+     "Support", 
+     color.new(color.blue, 0), 
+     2, 
+     plot.style_stepline)
+
+// Plot range
+plot(isConsolidating ? highestHigh : na, 
+     "Resistance", 
+     color.new(color.red, 0), 
+     1, 
+     plot.style_stepline)
+
+// ========================================
+// INFORMATION TABLE
+// ========================================
+var table infoTable = table.new(position.top_right, 2, 15, 
+                                 border_width=1, 
+                                 border_color=color.gray, 
+                                 bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    // Header
+    table.cell(infoTable, 0, 0, "Metric", 
+               text_color=color.white, 
+               bgcolor=color.new(color.blue, 50))
+    table.cell(infoTable, 1, 0, "Value", 
+               text_color=color.white, 
+               bgcolor=color.new(color.blue, 50))
+    
+    // Data
+    table.cell(infoTable, 0, 1, "Accumulation Score", text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(score) + "/12", 
+               text_color=score >= minScore ? color.lime : color.orange)
+    
+    table.cell(infoTable, 0, 2, "Status", text_color=color.white)
+    table.cell(infoTable, 1, 2, isAccumulation ? "✓ ACCUMULATING" : "Not in Phase", 
+               text_color=isAccumulation ? color.lime : color.gray)
+    
+    table.cell(infoTable, 0, 3, "Price Range %", text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring(priceRange, "#.##") + "%", 
+               text_color=color.yellow)
+    
+    table.cell(infoTable, 0, 4, "Volume Ratio", text_color=color.white)
+    table.cell(infoTable, 1, 4, str.tostring(volumeRatio, "#.##"), 
+               text_color=isBuyerVolume ? color.lime : color.red)
+    
+    table.cell(infoTable, 0, 5, "RSI", text_color=color.white)
+    table.cell(infoTable, 1, 5, str.tostring(rsi, "#.#"), 
+               text_color=isRSIRecovery ? color.lime : color.orange)
+    
+    table.cell(infoTable, 0, 6, "Range Position", text_color=color.white)
+    table.cell(infoTable, 1, 6, str.tostring(rangePosition, "#") + "%", 
+               text_color=color.yellow)
+    
+    table.cell(infoTable, 0, 7, "OBV Trend", text_color=color.white)
+    table.cell(infoTable, 1, 7, isOBVRising ? "↑ Rising" : "→ Flat/Down", 
+               text_color=isOBVRising ? color.lime : color.gray)
+    
+    table.cell(infoTable, 0, 8, "Avg Volume", text_color=color.white)
+    table.cell(infoTable, 1, 8, str.tostring(avgVolume / 1000000, "#.##") + "M", 
+               text_color=color.yellow)
+    
+    table.cell(infoTable, 0, 9, "Liquid Stock", text_color=color.white)
+    table.cell(infoTable, 1, 9, isLiquid ? "✓ Yes" : "✗ No", 
+               text_color=isLiquid ? color.lime : color.red)
+    
+    table.cell(infoTable, 0, 10, "Spring Detected", text_color=color.white)
+    table.cell(infoTable, 1, 10, wasSpring ? "✓ Yes" : "—", 
+               text_color=wasSpring ? color.yellow : color.gray)
+    
+    table.cell(infoTable, 0, 11, "ADX", text_color=color.white)
+    table.cell(infoTable, 1, 11, str.tostring(adx, "#.#"), 
+               text_color=isWeakTrend ? color.lime : color.orange)
+    
+    table.cell(infoTable, 0, 12, "MA Slope", text_color=color.white)
+    table.cell(infoTable, 1, 12, str.tostring(maSlope20, "#.##") + "%", 
+               text_color=isMaFlattening ? color.lime : color.red)
+    
+    table.cell(infoTable, 0, 13, "---", text_color=color.gray, bgcolor=color.new(color.gray, 80))
+    table.cell(infoTable, 1, 13, "---", text_color=color.gray, bgcolor=color.new(color.gray, 80))
+    
+    table.cell(infoTable, 0, 14, "Recommendation", text_color=color.white)
+    table.cell(infoTable, 1, 14, 
+               isAccumulation ? "WATCH/ACCUMULATE" : "WAIT", 
+               text_color=isAccumulation ? color.lime : color.orange)
+
+// ========================================
+// ALERTS
+// ========================================
+alertcondition(isAccumulation and not isAccumulation[1], 
+               "Accumulation Phase Detected", 
+               "{{ticker}} entered accumulation phase on weekly timeframe!")
+
+alertcondition(wasSpring and isLiquid, 
+               "Spring Detected", 
+               "{{ticker}} shows Wyckoff Spring pattern!")
+
+// Alternative: Use alert() for dynamic messages
+if isAccumulation and not isAccumulation[1]
+    alert("{{ticker}} Accumulation Score: " + str.tostring(score) + "/12", alert.freq_once_per_bar)
